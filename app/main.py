@@ -2,6 +2,7 @@ import os
 import time
 import tempfile
 import logging
+import subprocess
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
@@ -28,7 +29,9 @@ async def health():
     return {"status": "ok", "model_loaded": model.is_loaded}
 
 
-ALLOWED_EXTENSIONS = {".mp3", ".wav", ".ogg", ".oga", ".flac", ".m4a", ".webm"}
+ALLOWED_EXTENSIONS = {".mp3", ".wav", ".ogg", ".oga", ".flac", ".m4a", ".webm", ".mp4", ".aac", ".opus"}
+# Formats que libsndfile (soundfile) ne sait pas ouvrir : conversion ffmpeg -> wav.
+FFMPEG_EXTENSIONS = {".webm", ".m4a", ".mp4", ".aac", ".opus"}
 
 
 @app.post("/transcribe")
@@ -40,16 +43,28 @@ async def transcribe(audio: UploadFile = File(...)):
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported format '{ext}'. Supported: {', '.join(ALLOWED_EXTENSIONS)}",
+            detail=f"Unsupported format '{ext}'. Supported: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
         )
 
-    with tempfile.NamedTemporaryFile(suffix=ext, delete=True) as tmp:
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=True) as tmp, \
+         tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as wav:
         content = await audio.read()
         tmp.write(content)
         tmp.flush()
 
+        path = tmp.name
+        if ext in FFMPEG_EXTENSIONS:
+            proc = subprocess.run(
+                ["ffmpeg", "-y", "-i", tmp.name, "-ac", "1", "-ar", "16000", wav.name],
+                capture_output=True, timeout=120,
+            )
+            if proc.returncode != 0:
+                logger.error("ffmpeg failed: %s", proc.stderr[-500:])
+                raise HTTPException(status_code=400, detail="Audio illisible (conversion ffmpeg échouée)")
+            path = wav.name
+
         start = time.time()
-        text, duration = model.transcribe(tmp.name)
+        text, duration = model.transcribe(path)
         elapsed = time.time() - start
 
     return JSONResponse(
