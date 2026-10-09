@@ -4,6 +4,7 @@ import tempfile
 import logging
 import subprocess
 
+from fastapi.concurrency import run_in_threadpool
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 
@@ -12,7 +13,7 @@ from app.model import TranscriptionModel
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Voxtral Transcriber", version="1.0.0")
+app = FastAPI(title="Voxtral Transcriber", version="1.1.0")
 
 model = TranscriptionModel()
 
@@ -26,7 +27,13 @@ async def startup():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "model_loaded": model.is_loaded}
+    # Ne touche jamais au modèle : la transcription tourne dans un thread, la
+    # boucle d'événements reste libre et la sonde répond même en plein travail.
+    status = 200 if model.is_loaded else 503
+    return JSONResponse(
+        status_code=status,
+        content={"status": "ok" if model.is_loaded else "loading", "model_loaded": model.is_loaded, "busy": model.busy},
+    )
 
 
 ALLOWED_EXTENSIONS = {".mp3", ".wav", ".ogg", ".oga", ".flac", ".m4a", ".webm", ".mp4", ".aac", ".opus"}
@@ -54,7 +61,8 @@ async def transcribe(audio: UploadFile = File(...)):
 
         path = tmp.name
         if ext in FFMPEG_EXTENSIONS:
-            proc = subprocess.run(
+            proc = await run_in_threadpool(
+                subprocess.run,
                 ["ffmpeg", "-y", "-i", tmp.name, "-ac", "1", "-ar", "16000", wav.name],
                 capture_output=True, timeout=120,
             )
@@ -64,7 +72,8 @@ async def transcribe(audio: UploadFile = File(...)):
             path = wav.name
 
         start = time.time()
-        text, duration = model.transcribe(path)
+        # Hors de la boucle d'événements : /health doit répondre pendant ce temps.
+        text, duration = await run_in_threadpool(model.transcribe, path)
         elapsed = time.time() - start
 
     return JSONResponse(
