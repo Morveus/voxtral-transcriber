@@ -3,6 +3,7 @@ import time
 import tempfile
 import logging
 import subprocess
+from contextlib import asynccontextmanager
 
 from fastapi.concurrency import run_in_threadpool
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -13,16 +14,19 @@ from app.model import TranscriptionModel
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Voxtral Transcriber", version="1.1.0")
-
 model = TranscriptionModel()
 
 
-@app.on_event("startup")
-async def startup():
+# Starlette 1.x a retiré on_event : le chargement passe par le lifespan.
+@asynccontextmanager
+async def lifespan(_app):
     logger.info("Loading Voxtral model...")
     model.load()
     logger.info("Model loaded and ready.")
+    yield
+
+
+app = FastAPI(title="Voxtral Transcriber", version="1.1.1", lifespan=lifespan)
 
 
 @app.get("/health")
